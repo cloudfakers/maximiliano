@@ -1,17 +1,13 @@
 from flask import Flask, request, Response
-import ConfigParser
+from config import Config
 import json
-import os
 import requests as client
 
 TASKS_CONTENT_TYPE = "application/vnd.abiquo.tasks+json"
 TASK_CONTENT_TYPE = "application/vnd.abiquo.task+json"
 
 app = Flask(__name__)
-
-# initialization process
-Config = ConfigParser.ConfigParser()
-Config.read(os.path.join(os.environ['HOME'], ".config/maximiliano.conf"))
+config = Config()
 
 
 @app.route("/", methods=["POST"])
@@ -19,62 +15,92 @@ def listen():
     return parse_request(request)
 
 
-@app.route("/twitter", methods=["POST"])
-def twitter_listener():
+# @app.route("/twitter", methods=["POST"])
+def twitter_listener(tasks):
+    for task in tasks:
+        continue_task(task)
     return "Twitter will process this request %s" % str(request)
 
 
-@app.route("/fari", methods=["POST"])
-def fari_listener():
+# @app.route("/fari", methods=["POST"])
+def fari_listener(tasks):
+    for task in tasks:
+        cancel_task(task)
     return "El FARI will process this request %s" % str(request)
 
 
 def execute_workflow(tasks):
-    '''
+    """
     Will receive a list of tasks (VM if only one)
-    '''
+    """
     # Parsear enterprise name
     enterprise_name = get_enterprise_name(tasks)
-    workflow_parser = Config.get("enterprises", enterprise_name)
-    print "Workflow request received. " + workflow_parser \
-        + " will parse this fucking request from " + enterprise_name
-    if (workflow_parser == 'twitter'):
-        return twitter_listener()
-    elif (workflow_parser == 'fari'):
-        return twitter_listener
+    workflow_parser = config.get("enterprises", enterprise_name)
+    if workflow_parser == 'twitter':
+        return twitter_listener(tasks)
+    elif workflow_parser == 'fari':
+        return fari_listener(tasks)
     else:
         return 500
 
 
 def get_enterprise_name(tasks):
     # client request vapp
-    vm_url = ""
-    for link in tasks['collection'][0]['links']:
+    vm_url = None
+    for link in tasks[0]['links']:
         if link['rel'] == 'target':
             vm_url = link['href']
             break
-    print "http://%s/api/%s" % ("10.60.1.245", vm_url)
-    vm_response = client.get("http://%s/api/%s" % ("10.60.1.245", vm_url),
-                             auth=('admin', 'xabiquo'))
+    vm_response = client.get("%s/%s" %
+                             (config.api_endpoint, vm_url),
+                             auth=(config.api_user, config.api_password))
 
     vm_dto = json.loads(vm_response.text)
 
     for link in vm_dto['links']:
         if link['rel'] == 'enterprise':
-            #TODO if fails
+            # TODO if fails
             return link['title']
+    raise Exception("No enterprise link found")
+
+
+def continue_task(task):
+    client.post("%s/%s" % (config.api_endpoint,
+                           __get_action_href('continue', task)),
+                data="continue please",
+                auth=(config.api_user, config.api_password))
+
+
+def cancel_task(task):
+    client.post("%s/%s" % (config.api_endpoint,
+                           __get_action_href('cancel', task)),
+                data="continue please",
+                auth=(config.api_user, config.api_password))
 
 
 def parse_request(request):
-    if TASKS_CONTENT_TYPE == request.headers['content-type']:
+    """
+    Checks if a request is valid to start a workflow (200) or no (415)
+    """
+    if request.headers['content-type'].startswith(TASKS_CONTENT_TYPE):
         dto = json.loads(request.data)
-        execute_workflow(dto)
-    elif TASK_CONTENT_TYPE == request.headers['content-type']:
+        print execute_workflow(dto['collection'])
+        return Response(status=200)
+    elif request.headers['content-type'].startswith(TASK_CONTENT_TYPE):
         dto = json.loads(request.data)
-        execute_workflow([dto])
+        print execute_workflow([dto])
         return Response(status=200)
     else:
         return Response(status=415)
 
+
+def __get_action_href(name, task):
+    for link in task['links']:
+        if link['rel'] == name:
+            return link['href']
+
+
 if __name__ == "__main__":
-    app.run(host='localhost', port=8081, debug=True)
+    host = config.get("config", "host")
+    port = int(config.get("config", "port"))
+    app.run(host=host, port=port, debug=True)
